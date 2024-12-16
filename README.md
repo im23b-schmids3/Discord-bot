@@ -9,3 +9,4 @@ Folgende
     <li>discord.py</li>
     <li>python-dotenv </li> 
 </ul>
+<img src="Discord-bot.png" alt="Discord-Bot">
