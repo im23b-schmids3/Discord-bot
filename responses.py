@@ -2,17 +2,36 @@ import datetime
 
 
 def get_response(user_message):
-    user_input = user_message.lower()
+    user_input = {
+        '!help': help,
+        '!hello': hello,
+        '!time': time,
+        '!date': date,
+        "!test": test,
+    }
+    func = user_input.get(user_message.lower())
+    if func:
+        return func()
+    return "Command not recognized. Type !help for a list of commands."
 
-    if user_input == "!help" or user_input == "!commands":
-        return "I can respond to the following commands:\n!help, !commands\n\n!hello\n!time"
 
-    elif user_input == "!hello":
-        return 'Hey'
+def help():
+    return 'I can respond to the following commands:\n!help\n\n!hello\n!time\n!date'
 
-    elif user_input == "!time":
-        now = datetime.datetime.now()
-        return f'The current time is {now.strftime("%d-%m-%Y %H:%M")}'
 
-    else:
-        pass
+def hello():
+    return 'Hey'
+
+
+def time():
+    now = datetime.datetime.now()
+    return f'The current time is {now.strftime("%H:%M:%S")}'
+
+
+def date():
+    now = datetime.datetime.now()
+    return f'The current date is {now.strftime("%d-%m-%Y")}'
+
+
+def test():
+    return 'Testing file'
