@@ -24,6 +24,8 @@ intents.message_content = True  # Enable reading message content
 client = commands.Bot(command_prefix="!", intents=intents)
 
 song_queue = defaultdict(list)
+bot_loop = None
+
 
 async def join_and_play(ctx, url):
     voice_channel = ctx.author.voice.channel
@@ -37,6 +39,7 @@ async def join_and_play(ctx, url):
     song_queue[ctx.guild.id].append(url)
     if not ctx.voice_client.is_playing():
         await play_next(ctx)
+
 
 async def play_next(ctx):
     if song_queue[ctx.guild.id]:
@@ -58,10 +61,16 @@ async def play_next(ctx):
             await ctx.send(f"Fehler beim Abspielen: {e}")
             await play_next(ctx)
             return
+
         def after_playback(error):
-            fut = asyncio.run_coroutine_threadsafe(after_song(ctx), asyncio.get_event_loop())
+            global bot_loop
+            if bot_loop is not None:
+                fut = asyncio.run_coroutine_threadsafe(after_song(ctx), bot_loop)
+            else:
+                print("No event loop available for after_playback!")
             if error:
                 print(f"Fehler beim Abspielen: {error}")
+
         ctx.voice_client.play(source, after=after_playback)
     else:
         # Keine weiteren Songs, nach 10 Sekunden disconnecten
@@ -70,8 +79,10 @@ async def play_next(ctx):
             await ctx.voice_client.disconnect()
             song_queue[ctx.guild.id].clear()
 
+
 async def after_song(ctx):
     await play_next(ctx)
+
 
 @client.command()
 async def play(ctx, *, search: str):
@@ -95,8 +106,17 @@ async def play(ctx, *, search: str):
         except Exception as e:
             await ctx.send(f"Error during YouTube search: {e}")
             return
+    already_playing = ctx.voice_client and ctx.voice_client.is_playing()
     await join_and_play(ctx, url)
-    await ctx.send(f"Now playing: {search}")
+    if already_playing:
+        await ctx.send(f"A song is already playing. '{search}' has been added to the queue.")
+    else:
+        await ctx.send(f"Now playing: {search}")
+    # Queue anzeigen
+    queue = song_queue[ctx.guild.id]
+    if queue:
+        await ctx.send(f"Current queue: {len(queue)} song(s)")
+
 
 @client.command()
 async def skip(ctx):
@@ -104,8 +124,15 @@ async def skip(ctx):
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.stop()
         await ctx.send("Song skipped.")
+        # Queue anzeigen
+        queue = song_queue[ctx.guild.id]
+        if queue:
+            await ctx.send(f"Current queue: {len(queue)} song(s)")
+        else:
+            await ctx.send("Queue is empty.")
     else:
         await ctx.send("No song is currently playing.")
+
 
 @client.command()
 async def stop(ctx):
@@ -116,6 +143,7 @@ async def stop(ctx):
         await ctx.send("Playback stopped and left the voice channel.")
     else:
         await ctx.send("I'm not in a voice channel.")
+
 
 # Function to handle sending messages based on user input
 async def send_message(message, user_message):
@@ -131,6 +159,8 @@ async def send_message(message, user_message):
 # Event triggered when the bot is ready and connected to Discord
 @client.event
 async def on_ready():
+    global bot_loop
+    bot_loop = asyncio.get_event_loop()
     print(f'{client.user} has connected to Discord!')
 
 
@@ -139,8 +169,12 @@ async def on_ready():
 async def on_message(message):
     if message.author == client.user:
         return  # Ignore bot's own messages
-    await send_message(message, message.content)  # Process user message
+    # Prüfe, ob es ein Musik-Command ist
+    music_commands = ['!play', '!skip', '!stop']
+    if not any(message.content.lower().startswith(cmd) for cmd in music_commands):
+        await send_message(message, message.content)  # Process user message
     await client.process_commands(message)
+
 
 # Main function to run the bot using the provided token
 def main():
