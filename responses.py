@@ -46,11 +46,10 @@ class Response:
         """
         func = self.user_input.get(user_message.split()[0].lower())
         if func:
-            # If the command is !weather, pass the full message
             if user_message.split()[0].lower() == "!weather":
                 return func(user_message)
             else:
-                return func()  # Execute the function for other commands
+                return func()
         else:
             return "Command not recognized. Type !help for a list of commands."
 
