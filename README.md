@@ -1,6 +1,6 @@
 # Discord-bot
 
-Dies ist ein vielseitiger Discord-Bot, der auf Nachrichten in einem Discord-Server sowie auf private Nachrichten reagieren kann. Der Bot bietet verschiedene Funktionen wie Musik abspielen (YouTube), Wetterabfragen und mehr. Die Implementierung erfolgt in Python.
+Dies ist ein Discord-Bot, der auf Nachrichten in einem Discord-Server sowie auf private Nachrichten reagieren kann. Der Bot bietet verschiedene Funktionen wie Musik abspielen (YouTube), Wetterabfragen und mehr. Die Implementierung erfolgt in Python.
 
 <img src="Discord-bot.png" alt="Discord-Bot">
 
@@ -15,4 +15,5 @@ Dies ist ein vielseitiger Discord-Bot, der auf Nachrichten in einem Discord-Serv
 Weitere Standardbibliotheken: <code>os</code>, <code>asyncio</code>, <code>datetime</code>, <code>collections</code>, <code>typing</code>
 
 ## Autor
-**[im23b-schmids3](https://github.com/im23b-schmids3)**
+**[im23b-schmids3](https://github.com/im23b-schmids3)** </br>
+Feedback oder Vorschläge? Öffne ein Issue oder erstelle einen Pull-Request!
