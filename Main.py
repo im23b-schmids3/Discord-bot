@@ -8,6 +8,7 @@ import asyncio
 import yt_dlp
 import discord
 from collections import defaultdict
+import time
 
 # Load environment variables from the .env file
 load_dotenv()
@@ -26,6 +27,20 @@ client = commands.Bot(command_prefix="!", intents=intents)
 song_queue = defaultdict(list)
 bot_loop = None
 
+# Cooldown dictionary to track last command usage per user
+command_cooldowns = defaultdict(dict)
+COOLDOWN_DURATION = 5  # 5 seconds cooldown
+
+def check_cooldown(user_id: int, command: str) -> bool:
+    """Check if a user can use a command based on cooldown"""
+    current_time = time.time()
+    last_used = command_cooldowns[user_id].get(command, 0)
+    
+    if current_time - last_used < COOLDOWN_DURATION:
+        return False
+    
+    command_cooldowns[user_id][command] = current_time
+    return True
 
 async def join_and_play(ctx, url):
     voice_channel = ctx.author.voice.channel
@@ -56,6 +71,9 @@ async def play_next(ctx):
                 if 'entries' in info:
                     info = info['entries'][0]
                 audio_url = info['url'] if 'url' in info else info['formats'][0]['url']
+                # Get video title and webpage URL for better display
+                video_title = info.get('title', 'Unknown Title')
+                webpage_url = info.get('webpage_url', url)
             source = await discord.FFmpegOpusAudio.from_probe(audio_url, method='fallback')
         except Exception as e:
             await ctx.send(f"Fehler beim Abspielen: {e}")
@@ -72,6 +90,8 @@ async def play_next(ctx):
                 print(f"Fehler beim Abspielen: {error}")
 
         ctx.voice_client.play(source, after=after_playback)
+        # Send YouTube link instead of just song name
+        await ctx.send(f" Spielt jetzt: **{video_title}**\n {webpage_url}")
     else:
         # Keine weiteren Songs, nach 10 Sekunden disconnecten
         await asyncio.sleep(10)
@@ -87,8 +107,12 @@ async def after_song(ctx):
 @client.command()
 async def play(ctx, *, search: str):
     """Plays a song from YouTube. Use !play <song name or YouTube link>"""
+    # Check cooldown - silently ignore if on cooldown
+    if not check_cooldown(ctx.author.id, 'play'):
+        return
+    
     if not ctx.author.voice or not ctx.author.voice.channel:
-        await ctx.send("You must be in a voice channel!")
+        await ctx.send("Du musst in einem Sprachkanal sein!")
         return
     # Check if it's a YouTube link
     if 'youtube.com/watch' in search or 'youtu.be/' in search:
@@ -100,49 +124,56 @@ async def play(ctx, *, search: str):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(search, download=False)
                 if not info['entries']:
-                    await ctx.send("No song found!")
+                    await ctx.send("Kein Song gefunden!")
                     return
                 url = info['entries'][0]['webpage_url']
         except Exception as e:
-            await ctx.send(f"Error during YouTube search: {e}")
+            await ctx.send(f"Fehler bei der YouTube-Suche: {e}")
             return
     already_playing = ctx.voice_client and ctx.voice_client.is_playing()
     await join_and_play(ctx, url)
     if already_playing:
-        await ctx.send(f"A song is already playing. '{search}' has been added to the queue.")
-    else:
-        await ctx.send(f"Now playing: {search}")
+        await ctx.send(f"Ein Song läuft bereits. '{search}' wurde zur Warteschlange hinzugefügt.")
+    
     # Queue anzeigen
     queue = song_queue[ctx.guild.id]
     if queue:
-        await ctx.send(f"Current queue: {len(queue)} song(s)")
+        await ctx.send(f"Aktuelle Warteschlange: {len(queue)} Song(s)")
 
 
 @client.command()
 async def skip(ctx):
     """Skips the current song."""
+    # Check cooldown - silently ignore if on cooldown
+    if not check_cooldown(ctx.author.id, 'skip'):
+        return
+    
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.stop()
-        await ctx.send("Song skipped.")
+        await ctx.send("Song übersprungen.")
         # Queue anzeigen
         queue = song_queue[ctx.guild.id]
         if queue:
-            await ctx.send(f"Current queue: {len(queue)} song(s)")
+            await ctx.send(f"Aktuelle Warteschlange: {len(queue)} Song(s)")
         else:
-            await ctx.send("Queue is empty.")
+            await ctx.send("Warteschlange ist leer.")
     else:
-        await ctx.send("No song is currently playing.")
+        await ctx.send("Aktuell wird kein Song abgespielt.")
 
 
 @client.command()
 async def stop(ctx):
     """Stops playback and leaves the voice channel."""
+    # Check cooldown - silently ignore if on cooldown
+    if not check_cooldown(ctx.author.id, 'stop'):
+        return
+    
     if ctx.voice_client:
         await ctx.voice_client.disconnect()
         song_queue[ctx.guild.id].clear()
-        await ctx.send("Playback stopped and left the voice channel.")
+        await ctx.send("Wiedergabe gestoppt und Sprachkanal verlassen.")
     else:
-        await ctx.send("I'm not in a voice channel.")
+        await ctx.send("Ich bin nicht in einem Sprachkanal.")
 
 
 # Function to handle sending messages based on user input
@@ -169,10 +200,15 @@ async def on_ready():
 async def on_message(message):
     if message.author == client.user:
         return  # Ignore bot's own messages
-    # Prüfe, ob es ein Musik-Command ist
-    music_commands = ['!play', '!skip', '!stop']
-    if not any(message.content.lower().startswith(cmd) for cmd in music_commands):
+    
+    # Check cooldown for non-music commands
+    if not message.content.lower().startswith(('!play', '!skip', '!stop')):
+        # Check cooldown for other commands - silently ignore if on cooldown
+        if not check_cooldown(message.author.id, 'general'):
+            return
+        
         await send_message(message, message.content)  # Process user message
+    
     await client.process_commands(message)
 
 
