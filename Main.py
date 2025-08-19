@@ -32,7 +32,7 @@ connection_failures = defaultdict(int)
 
 # Cooldown dictionary to track last command usage per user
 command_cooldowns = defaultdict(dict)
-COOLDOWN_DURATION = 5  # 5 seconds cooldown
+COOLDOWN_DURATION = 1  # 1 seconds cooldown
 
 def check_cooldown(user_id: int, command: str) -> bool:
     """Check if a user can use a command based on cooldown"""
@@ -47,11 +47,36 @@ def check_cooldown(user_id: int, command: str) -> bool:
 
 async def join_and_play(ctx, url):
     voice_channel = ctx.author.voice.channel
+    
+    # Check bot permissions
+    permissions = voice_channel.permissions_for(ctx.guild.me)
+    if not permissions.connect or not permissions.speak:
+        await ctx.send("Ich habe keine Berechtigung, diesem Sprachkanal beizutreten oder zu sprechen!")
+        return
+    
+    # Disconnect from any existing connection to avoid session conflicts
+    if ctx.voice_client:
+        await ctx.voice_client.disconnect(force=True)
+        await asyncio.sleep(1)  # Wait for clean disconnect
+    
     # Verbinde mit Sprachkanal, falls nicht schon verbunden
-    if ctx.voice_client is None:
-        await voice_channel.connect()
-    elif ctx.voice_client.channel != voice_channel:
-        await ctx.voice_client.move_to(voice_channel)
+    try:
+        voice_client = await voice_channel.connect(timeout=10.0, reconnect=True)
+        await asyncio.sleep(0.5)  # Small delay for connection stability
+    except discord.ClientException as e:
+        if "already connected" in str(e).lower():
+            await ctx.send("Bot ist bereits mit einem Sprachkanal verbunden.")
+            return
+        logging.error(f"Client error during voice connection: {e}")
+        await ctx.send(f"Fehler beim Verbinden: {e}")
+        return
+    except asyncio.TimeoutError:
+        await ctx.send("Verbindung zum Sprachkanal ist fehlgeschlagen (Timeout).")
+        return
+    except Exception as e:
+        logging.error(f"Voice connection failed: {e}")
+        await ctx.send(f"Fehler beim Verbinden mit Sprachkanal: {e}")
+        return
 
     # Song zur Warteschlange hinzufügen
     song_queue[ctx.guild.id].append(url)
@@ -66,26 +91,65 @@ async def play_next(ctx):
             await ctx.send("Bot is not connected to voice. Rejoining…")
             await join_and_play(ctx, url)
             return
+        
+        # Updated yt-dlp options to handle nsig extraction issues
         ydl_opts = {
             'format': 'bestaudio/best',
             'quiet': True,
             'noplaylist': True,
             'extract_flat': 'in_playlist',
+            'no_warnings': True,
+            'extractaudio': True,
+            'audioformat': 'opus',
+            'logtostderr': False,
+            'ignoreerrors': True,
+            'source_address': '0.0.0.0',  # Bind to ipv4 since ipv6 addresses cause issues sometimes
+            'prefer_ffmpeg': True,
+            'cachedir': False,
+            'youtube_include_dash_manifest': False,
         }
+        
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if 'entries' in info:
                     info = info['entries'][0]
-                audio_url = info['url'] if 'url' in info else info['formats'][0]['url']
+                
+                # Try multiple audio URL extraction methods
+                audio_url = None
+                if 'url' in info:
+                    audio_url = info['url']
+                elif 'formats' in info:
+                    # Filter for audio-only formats first
+                    audio_formats = [f for f in info['formats'] if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+                    if audio_formats:
+                        audio_url = audio_formats[0]['url']
+                    else:
+                        # Fallback to any format with audio
+                        audio_formats = [f for f in info['formats'] if f.get('acodec') != 'none']
+                        if audio_formats:
+                            audio_url = audio_formats[0]['url']
+                
+                if not audio_url:
+                    raise Exception("No suitable audio format found")
+                
                 # Get video title and webpage URL for better display
                 video_title = info.get('title', 'Unknown Title')
                 webpage_url = info.get('webpage_url', url)
-            source = await discord.FFmpegOpusAudio.from_probe(audio_url, method='fallback')
+                
+            # Use FFMPEG with better options for stability
+            ffmpeg_options = {
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                'options': '-vn -filter:a "volume=0.5"'
+            }
+            source = discord.FFmpegPCMAudio(audio_url, **ffmpeg_options)
+            
         except Exception as e:
+            logging.error(f"Error extracting audio: {e}")
             await ctx.send(f"Fehler beim Abspielen: {e}")
             await play_next(ctx)
             return
+            
         if ctx.voice_client is None:
             await ctx.send("Bot is not connected to voice. Rejoining…")
             await join_and_play(ctx, url)
@@ -96,11 +160,11 @@ async def play_next(ctx):
             if bot_loop is not None:
                 if error:
                     logging.error(f"Fehler beim Abspielen: {error}")
-                    if '4006' in str(error):
+                    if '4006' in str(error) or 'voice connection' in str(error).lower():
                         connection_failures[ctx.guild.id] += 1
                         if connection_failures[ctx.guild.id] >= 3:
-                            logging.info("Repeated 4006 errors. Reconnecting to voice channel.")
-                            asyncio.run_coroutine_threadsafe(join_and_play(ctx, url), bot_loop)
+                            logging.info("Repeated connection errors. Reconnecting to voice channel.")
+                            asyncio.run_coroutine_threadsafe(reconnect_and_retry(ctx, url), bot_loop)
                             connection_failures[ctx.guild.id] = 0
                             return
                     else:
@@ -111,15 +175,32 @@ async def play_next(ctx):
             else:
                 print("No event loop available for after_playback!")
 
-        ctx.voice_client.play(source, after=after_playback)
-        # Send YouTube link instead of just song name
-        await ctx.send(f" Spielt jetzt: **{video_title}**\n {webpage_url}")
+        try:
+            ctx.voice_client.play(source, after=after_playback)
+            # Send YouTube link instead of just song name
+            await ctx.send(f" Spielt jetzt: **{video_title}**\n {webpage_url}")
+        except Exception as e:
+            logging.error(f"Error starting playback: {e}")
+            await ctx.send(f"Fehler beim Starten der Wiedergabe: {e}")
+            await play_next(ctx)
     else:
         # Keine weiteren Songs, nach 10 Sekunden disconnecten
         await asyncio.sleep(10)
-        if not ctx.voice_client.is_playing():
+        if ctx.voice_client and not ctx.voice_client.is_playing():
             await ctx.voice_client.disconnect()
             song_queue[ctx.guild.id].clear()
+
+
+async def reconnect_and_retry(ctx, url):
+    """Reconnect to voice channel and retry playing"""
+    try:
+        if ctx.voice_client:
+            await ctx.voice_client.disconnect()
+        await asyncio.sleep(2)  # Wait before reconnecting
+        await join_and_play(ctx, url)
+    except Exception as e:
+        logging.error(f"Reconnection failed: {e}")
+        await ctx.send("Verbindung fehlgeschlagen. Bitte versuche es erneut.")
 
 
 async def after_song(ctx):
@@ -133,15 +214,39 @@ async def play(ctx, *, search: str):
     if not check_cooldown(ctx.author.id, 'play'):
         return
     
-    if not ctx.author.voice or not ctx.author.voice.channel:
+    # Enhanced user validation
+    if not ctx.author.voice:
         await ctx.send("Du musst in einem Sprachkanal sein!")
         return
+    
+    if not ctx.author.voice.channel:
+        await ctx.send("Du bist nicht in einem gültigen Sprachkanal!")
+        return
+    
+    # Check if bot can join the channel
+    voice_channel = ctx.author.voice.channel
+    permissions = voice_channel.permissions_for(ctx.guild.me)
+    if not permissions.connect:
+        await ctx.send("Ich habe keine Berechtigung, diesem Sprachkanal beizutreten!")
+        return
+    if not permissions.speak:
+        await ctx.send("Ich habe keine Berechtigung, in diesem Sprachkanal zu sprechen!")
+        return
+    
     # Check if it's a YouTube link
     if 'youtube.com/watch' in search or 'youtu.be/' in search:
         url = search
     else:
-        # Search on YouTube
-        ydl_opts = {'format': 'bestaudio', 'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch1'}
+        # Search on YouTube with updated options
+        ydl_opts = {
+            'format': 'bestaudio', 
+            'noplaylist': True, 
+            'quiet': True, 
+            'default_search': 'ytsearch1',
+            'no_warnings': True,
+            'source_address': '0.0.0.0',
+            'youtube_include_dash_manifest': False,
+        }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(search, download=False)
@@ -150,17 +255,24 @@ async def play(ctx, *, search: str):
                     return
                 url = info['entries'][0]['webpage_url']
         except Exception as e:
+            logging.error(f"YouTube search error: {e}")
             await ctx.send(f"Fehler bei der YouTube-Suche: {e}")
             return
-    already_playing = ctx.voice_client and ctx.voice_client.is_playing()
-    await join_and_play(ctx, url)
-    if already_playing:
-        await ctx.send(f"Ein Song läuft bereits. '{search}' wurde zur Warteschlange hinzugefügt.")
     
-    # Queue anzeigen
-    queue = song_queue[ctx.guild.id]
-    if queue:
-        await ctx.send(f"Aktuelle Warteschlange: {len(queue)} Song(s)")
+    already_playing = ctx.voice_client and ctx.voice_client.is_playing()
+    
+    try:
+        await join_and_play(ctx, url)
+        if already_playing:
+            await ctx.send(f"Ein Song läuft bereits. '{search}' wurde zur Warteschlange hinzugefügt.")
+        
+        # Queue anzeigen
+        queue = song_queue[ctx.guild.id]
+        if queue:
+            await ctx.send(f"Aktuelle Warteschlange: {len(queue)} Song(s)")
+    except Exception as e:
+        logging.error(f"Error in play command: {e}")
+        await ctx.send("Ein Fehler ist aufgetreten. Bitte versuche es erneut.")
 
 
 @client.command()
@@ -191,8 +303,9 @@ async def stop(ctx):
         return
     
     if ctx.voice_client:
-        await ctx.voice_client.disconnect()
+        await ctx.voice_client.disconnect(force=True)
         song_queue[ctx.guild.id].clear()
+        connection_failures[ctx.guild.id] = 0  # Reset connection failures
         await ctx.send("Wiedergabe gestoppt und Sprachkanal verlassen.")
     else:
         await ctx.send("Ich bin nicht in einem Sprachkanal.")
@@ -214,6 +327,12 @@ async def send_message(message, user_message):
 async def on_ready():
     global bot_loop
     bot_loop = asyncio.get_event_loop()
+    
+    # Disconnect from any voice channels on startup to avoid session conflicts
+    for guild in client.guilds:
+        if guild.voice_client:
+            await guild.voice_client.disconnect(force=True)
+    
     print(f'{client.user} has connected to Discord!')
 
 
