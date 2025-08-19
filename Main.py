@@ -9,9 +9,11 @@ import yt_dlp
 import discord
 from collections import defaultdict
 import time
+import logging
 
 # Load environment variables from the .env file
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
 # Retrieve the Discord bot token from environment variables
 TOKEN: Final = os.getenv('DISCORD_TOKEN')
@@ -26,6 +28,7 @@ client = commands.Bot(command_prefix="!", intents=intents)
 
 song_queue = defaultdict(list)
 bot_loop = None
+connection_failures = defaultdict(int)
 
 # Cooldown dictionary to track last command usage per user
 command_cooldowns = defaultdict(dict)
@@ -59,6 +62,10 @@ async def join_and_play(ctx, url):
 async def play_next(ctx):
     if song_queue[ctx.guild.id]:
         url = song_queue[ctx.guild.id].pop(0)
+        if ctx.voice_client is None:
+            await ctx.send("Bot is not connected to voice. Rejoining…")
+            await join_and_play(ctx, url)
+            return
         ydl_opts = {
             'format': 'bestaudio/best',
             'quiet': True,
@@ -79,15 +86,30 @@ async def play_next(ctx):
             await ctx.send(f"Fehler beim Abspielen: {e}")
             await play_next(ctx)
             return
+        if ctx.voice_client is None:
+            await ctx.send("Bot is not connected to voice. Rejoining…")
+            await join_and_play(ctx, url)
+            return
 
         def after_playback(error):
             global bot_loop
             if bot_loop is not None:
-                fut = asyncio.run_coroutine_threadsafe(after_song(ctx), bot_loop)
+                if error:
+                    logging.error(f"Fehler beim Abspielen: {error}")
+                    if '4006' in str(error):
+                        connection_failures[ctx.guild.id] += 1
+                        if connection_failures[ctx.guild.id] >= 3:
+                            logging.info("Repeated 4006 errors. Reconnecting to voice channel.")
+                            asyncio.run_coroutine_threadsafe(join_and_play(ctx, url), bot_loop)
+                            connection_failures[ctx.guild.id] = 0
+                            return
+                    else:
+                        connection_failures[ctx.guild.id] = 0
+                else:
+                    connection_failures[ctx.guild.id] = 0
+                asyncio.run_coroutine_threadsafe(after_song(ctx), bot_loop)
             else:
                 print("No event loop available for after_playback!")
-            if error:
-                print(f"Fehler beim Abspielen: {error}")
 
         ctx.voice_client.play(source, after=after_playback)
         # Send YouTube link instead of just song name
